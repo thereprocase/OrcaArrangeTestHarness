@@ -113,6 +113,76 @@ static BoundingBox make_bed(double w_mm, double h_mm) {
     return BoundingBox({0, 0}, {scaled(w_mm), scaled(h_mm)});
 }
 
+// Build concave_triangles from an ExPolygon by triangulating the contour.
+// Simple fan triangulation from vertex 0 — works for convex and simple concave
+// shapes. Not a general ear-clipping triangulator, but sufficient for test shapes.
+static void populate_concave_triangles(ArrangePolygon &ap, float height_mm = 10.0f) {
+    const auto &pts = ap.poly.contour.points;
+    if (pts.size() < 3) return;
+
+    ap.concave_triangles.clear();
+    ap.concave_z.clear();
+
+    // Fan triangulation from vertex 0
+    for (size_t i = 1; i + 1 < pts.size(); i++) {
+        ap.concave_triangles.push_back(pts[0]);
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_triangles.push_back(pts[i + 1]);
+        // All vertices at z=0 (flat 2D part)
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(0.f);
+    }
+}
+
+// Same but with varying Z heights for 3D nesting tests
+static void populate_concave_triangles_3d(ArrangePolygon &ap, float height_mm) {
+    const auto &pts = ap.poly.contour.points;
+    if (pts.size() < 3) return;
+
+    ap.concave_triangles.clear();
+    ap.concave_z.clear();
+
+    // Bottom face (z=0)
+    for (size_t i = 1; i + 1 < pts.size(); i++) {
+        ap.concave_triangles.push_back(pts[0]);
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_triangles.push_back(pts[i + 1]);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(0.f);
+    }
+
+    // Top face (z=height_mm)
+    for (size_t i = 1; i + 1 < pts.size(); i++) {
+        ap.concave_triangles.push_back(pts[0]);
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_triangles.push_back(pts[i + 1]);
+        ap.concave_z.push_back(height_mm);
+        ap.concave_z.push_back(height_mm);
+        ap.concave_z.push_back(height_mm);
+    }
+
+    // Side walls — connect bottom to top edges
+    for (size_t i = 0; i < pts.size(); i++) {
+        size_t j = (i + 1) % pts.size();
+        // Two triangles per quad
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_triangles.push_back(pts[j]);
+        ap.concave_triangles.push_back(pts[j]);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(height_mm);
+
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_triangles.push_back(pts[j]);
+        ap.concave_triangles.push_back(pts[i]);
+        ap.concave_z.push_back(0.f);
+        ap.concave_z.push_back(height_mm);
+        ap.concave_z.push_back(height_mm);
+    }
+}
+
 // --- Test result ---
 
 struct TestResult {
@@ -580,6 +650,203 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         p.allow_multi_materials_on_same_plate = false;
         return run_scenario("single_material_group", items, bed, p, true,
             "all same material — should all go on one plate");
+    };
+
+    // --- Concave triangle rasterization path ---
+
+    scenarios["triangles_rects"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 10; i++) {
+            auto ap = make_ap(make_rect(30, 20));
+            populate_concave_triangles(ap);
+            items.push_back(ap);
+        }
+        return run_scenario("triangles_rects", items, bed, params, true,
+            "10 rects via concave_triangles path — should match ExPolygon results");
+    };
+
+    scenarios["triangles_L_shapes"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) {
+            auto ap = make_ap(make_L(40));
+            populate_concave_triangles(ap);
+            items.push_back(ap);
+        }
+        return run_scenario("triangles_L_shapes", items, bed, params, true,
+            "6 L-shapes via triangle rasterizer");
+    };
+
+    scenarios["triangles_T_shapes"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 8; i++) {
+            auto ap = make_ap(make_T(40));
+            populate_concave_triangles(ap);
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 2;
+        return run_scenario("triangles_T_shapes", items, bed, p, true,
+            "8 T-shapes via triangle rasterizer with rotation", true);
+    };
+
+    scenarios["triangles_mixed_concave"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_L(30)); populate_concave_triangles(ap); items.push_back(ap);
+        }
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_T(25)); populate_concave_triangles(ap); items.push_back(ap);
+        }
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_U(20)); populate_concave_triangles(ap); items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 4;
+        return run_scenario("triangles_mixed_concave", items, bed, p, true,
+            "15 mixed concave shapes via triangle path with rotation", true);
+    };
+
+    // --- 3D nesting ---
+
+    scenarios["nesting_3d_basic"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) {
+            auto ap = make_ap(make_rect(40, 30));
+            populate_concave_triangles_3d(ap, 20.0f);
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.nesting_3d = true;
+        p.slice_height_mm = 10.0f;
+        p.z_clearance_mm = 2.0f;
+        return run_scenario("nesting_3d_basic", items, bed, p, true,
+            "6 rects with 3D nesting — same-height prisms, should collapse to 2D");
+    };
+
+    scenarios["nesting_3d_mixed_heights"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // Tall thin items and short wide items
+        for (int i = 0; i < 4; i++) {
+            auto ap = make_ap(make_rect(30, 30));
+            populate_concave_triangles_3d(ap, 80.0f); // tall
+            items.push_back(ap);
+        }
+        for (int i = 0; i < 8; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            populate_concave_triangles_3d(ap, 10.0f); // short
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.nesting_3d = true;
+        p.slice_height_mm = 10.0f;
+        p.z_clearance_mm = 2.0f;
+        return run_scenario("nesting_3d_mixed_heights", items, bed, p, true,
+            "4 tall + 8 short items — 3D nesting should pack short items under tall overhangs");
+    };
+
+    // --- Pre-assigned bed_idx (keep-plates at arranger level) ---
+
+    scenarios["keep_plates_basic"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // 3 items on plate 0
+        for (int i = 0; i < 3; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.bed_idx = 0;
+            items.push_back(ap);
+        }
+        // 3 items on plate 1
+        for (int i = 0; i < 3; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.bed_idx = 1;
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_plate = false; // keep-plates: no new plates
+        return run_scenario("keep_plates_basic", items, bed, p, true,
+            "6 items pre-assigned to 2 plates — should stay on their plates");
+    };
+
+    scenarios["keep_plates_verify_assignment"] = [=]() {
+        // Verify items actually stay on their assigned plate
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 2; i++) {
+            auto ap = make_ap(make_rect(60, 60));
+            ap.bed_idx = 0;
+            items.push_back(ap);
+        }
+        for (int i = 0; i < 2; i++) {
+            auto ap = make_ap(make_rect(60, 60));
+            ap.bed_idx = 1;
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        TestResult result;
+        result.scenario_name = "keep_plates_verify_assignment";
+        result.total_items = 4;
+        result.placed_items = 0;
+        result.plates_used = 0;
+        result.no_overlap = true;
+        bool correct_plates = true;
+        for (int i = 0; i < 4; i++) {
+            if (items[i].bed_idx >= 0) result.placed_items++;
+            result.plates_used = std::max(result.plates_used, items[i].bed_idx + 1);
+            int expected_plate = (i < 2) ? 0 : 1;
+            if (items[i].bed_idx != expected_plate)
+                correct_plates = false;
+        }
+        result.all_placed = (result.placed_items == result.total_items);
+        result.elapsed_ms = 0;
+        result.notes = correct_plates ? "all items on correct plates" : "WRONG PLATE ASSIGNMENT";
+        if (!correct_plates) result.notes += " UNEXPECTED_UNPLACED";
+        return result;
+    };
+
+    // --- Material separation ---
+
+    scenarios["material_separation_2_types"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.filament_temp_type = 0; // high temp
+            ap.extrude_ids = {1};
+            items.push_back(ap);
+        }
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.filament_temp_type = 1; // low temp
+            ap.extrude_ids = {2};
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_materials_on_same_plate = false;
+        return run_scenario("material_separation_2_types", items, bed, p, true,
+            "5 high-temp + 5 low-temp — should land on separate plates");
+    };
+
+    scenarios["material_mixed_allowed"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.filament_temp_type = 0;
+            ap.extrude_ids = {1};
+            items.push_back(ap);
+        }
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.filament_temp_type = 1;
+            ap.extrude_ids = {2};
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_materials_on_same_plate = true;
+        return run_scenario("material_mixed_allowed", items, bed, p, true,
+            "mixed materials allowed — all should fit on 1 plate");
     };
 
     return scenarios;

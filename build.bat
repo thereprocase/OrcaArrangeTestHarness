@@ -14,6 +14,6 @@ cd /d F:\Claude\OrcaTestHarness
 if not exist build mkdir build
 cd build
 cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release
-start /BELOWNORMAL /WAIT cmake --build . --config Release -j 4
+cmake --build . --config Release -j 4
 
 del "%LOCKFILE%" 2>NUL
