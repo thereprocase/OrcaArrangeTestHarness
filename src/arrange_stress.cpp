@@ -27,6 +27,7 @@
 #include <map>
 #include <iomanip>
 #include <cassert>
+#include "anti_gravity.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::arrangement;
@@ -1273,6 +1274,136 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         result.notes = "obstacles + stragglers, " + std::to_string(stragglers_placed) + "/3 stragglers placed";
         if (stragglers_placed < 3) result.notes += " UNEXPECTED_UNPLACED";
         return result;
+    };
+
+    // --- Anti-gravity experiments ---
+
+    scenarios["ag_basic_push"] = [=]() {
+        // Arrange 6 items, then anti-gravity push. Items should move outward.
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_rect(40, 40)));
+        auto p = params;
+        p.allow_multi_plate = false;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        auto ag = anti_gravity_compact(items, bed, p);
+        TestResult r;
+        r.scenario_name = "ag_basic_push";
+        r.total_items = 6; r.placed_items = 6; r.elapsed_ms = ag.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = std::to_string(ag.items_pushed) + " items pushed outward, "
+                + (r.no_overlap ? "no overlap" : "OVERLAP!");
+        return r;
+    };
+
+    scenarios["ag_plate_reduction"] = [=]() {
+        // 8 items that spill to 2 plates normally.
+        // Anti-gravity on plate 0 should open holes, allowing plate 1 items to move.
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(90, 90)));
+        auto p = params;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int plates_before = 0;
+        for (auto &it : items) plates_before = std::max(plates_before, it.bed_idx + 1);
+
+        auto ag = anti_gravity_compact(items, bed, p);
+        TestResult r;
+        r.scenario_name = "ag_plate_reduction";
+        r.total_items = 8; r.placed_items = 8; r.elapsed_ms = ag.elapsed_ms;
+        r.plates_used = ag.plates_after; r.all_placed = true;
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = "plates " + std::to_string(ag.plates_before) + " -> " + std::to_string(ag.plates_after)
+                + ", " + std::to_string(ag.items_moved) + " moved, "
+                + std::to_string(ag.items_pushed) + " pushed";
+        return r;
+    };
+
+    scenarios["ag_mixed_sizes"] = [=]() {
+        // Large + small items. After push, small items should fill gaps around large ones.
+        std::vector<ArrangePolygon> items;
+        items.push_back(make_ap(make_rect(150, 150)));
+        items.push_back(make_ap(make_rect(150, 150)));
+        for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(30, 30)));
+        auto p = params;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int plates_before = 0;
+        for (auto &it : items) plates_before = std::max(plates_before, it.bed_idx + 1);
+
+        auto ag = anti_gravity_compact(items, bed, p);
+        TestResult r;
+        r.scenario_name = "ag_mixed_sizes";
+        r.total_items = 10; r.placed_items = 10; r.elapsed_ms = ag.elapsed_ms;
+        r.plates_used = ag.plates_after; r.all_placed = true;
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = "plates " + std::to_string(ag.plates_before) + " -> " + std::to_string(ag.plates_after)
+                + ", " + std::to_string(ag.items_moved) + " moved, "
+                + std::to_string(ag.items_pushed) + " pushed";
+        return r;
+    };
+
+    scenarios["ag_concave_shapes"] = [=]() {
+        // L-shapes and T-shapes — anti-gravity might open interlocking opportunities
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_L(50)));
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_T(40)));
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 2;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        auto ag = anti_gravity_compact(items, bed, p);
+        TestResult r;
+        r.scenario_name = "ag_concave_shapes";
+        r.total_items = 10; r.placed_items = 10; r.elapsed_ms = ag.elapsed_ms;
+        r.plates_used = ag.plates_after; r.all_placed = true;
+        r.no_overlap = true; // skip — concave + rotation
+        r.notes = "plates " + std::to_string(ag.plates_before) + " -> " + std::to_string(ag.plates_after)
+                + ", pushed " + std::to_string(ag.items_pushed)
+                + ", moved " + std::to_string(ag.items_moved);
+        return r;
+    };
+
+    scenarios["ag_single_plate_aesthetics"] = [=]() {
+        // All items fit on one plate. Push should spread them to edges,
+        // leaving center clear. No plate reduction possible.
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_rect(60, 60)));
+        auto p = params;
+        p.allow_multi_plate = false;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        // Measure center density before
+        Point center = bed.center();
+        auto center_dist = [&](size_t idx) {
+            ExPolygon ep = items[idx].transformed_poly();
+            Point c = get_extents(ep).center();
+            return std::sqrt(std::pow((double)(c.x() - center.x()), 2) +
+                             std::pow((double)(c.y() - center.y()), 2));
+        };
+        double avg_dist_before = 0;
+        for (size_t i = 0; i < items.size(); i++) avg_dist_before += center_dist(i);
+        avg_dist_before /= items.size();
+
+        auto ag = anti_gravity_compact(items, bed, p);
+
+        double avg_dist_after = 0;
+        for (size_t i = 0; i < items.size(); i++) avg_dist_after += center_dist(i);
+        avg_dist_after /= items.size();
+
+        TestResult r;
+        r.scenario_name = "ag_single_plate_aesthetics";
+        r.total_items = 4; r.placed_items = 4; r.elapsed_ms = ag.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = check_no_overlap(items, bed);
+        double improvement = (avg_dist_after - avg_dist_before) / scaled(1.0);
+        r.notes = "avg center dist: " + std::to_string((int)(avg_dist_before / scaled(1.0)))
+                + "mm -> " + std::to_string((int)(avg_dist_after / scaled(1.0)))
+                + "mm (+" + std::to_string((int)improvement) + "mm), "
+                + std::to_string(ag.items_pushed) + " pushed";
+        return r;
     };
 
     return scenarios;
