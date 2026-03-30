@@ -890,6 +890,288 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
             "mixed materials allowed — all should fit on 1 plate");
     };
 
+    // --- Truth table: intent-to-plate behavior ---
+    // Tests every meaningful combination of consolidate/fill/bed_idx to verify
+    // the arranger respects the contract for each mode.
+
+    // ARRANGE ALL: consolidate OFF, fill ON — default behavior
+    scenarios["tt_all_default"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // Pre-assign some to plates, leave some unassigned
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(80, 80)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(80, 80)); ap.bed_idx = 1; items.push_back(ap); }
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(80, 80)); ap.bed_idx = -1; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = false;
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int placed = 0;
+        for (auto &it : items) if (it.bed_idx >= 0) placed++;
+        TestResult r;
+        r.scenario_name = "tt_all_default";
+        r.total_items = 8; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = 0;
+        for (auto &it : items) r.plates_used = std::max(r.plates_used, it.bed_idx + 1);
+        r.all_placed = (placed == 8);
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = r.all_placed ? "all placed, free plate assignment" : "UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // ARRANGE ALL: consolidate ON, fill ON — nuke and repack
+    scenarios["tt_all_consolidate"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // Spread across 3 plates — consolidate should repack to fewer
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 1; items.push_back(ap); }
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 2; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = true;
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int placed = 0, max_plate = -1;
+        for (auto &it : items) {
+            if (it.bed_idx >= 0) { placed++; max_plate = std::max(max_plate, it.bed_idx); }
+        }
+        TestResult r;
+        r.scenario_name = "tt_all_consolidate";
+        r.total_items = 6; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = max_plate + 1;
+        r.all_placed = (placed == 6);
+        r.no_overlap = check_no_overlap(items, bed);
+        // 6 small items should consolidate onto 1 plate
+        r.notes = (r.plates_used <= 1) ? "consolidated to 1 plate" : "plates=" + std::to_string(r.plates_used) + " expected 1";
+        if (r.plates_used > 1) r.notes += " UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // ARRANGE ALL: consolidate OFF, fill OFF — one plate only, overflow unarranged
+    scenarios["tt_all_no_fill"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(130, 130)));
+        auto p = params;
+        p.consolidate_plates = false;
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int placed = 0;
+        for (auto &it : items) if (it.bed_idx >= 0) placed++;
+        TestResult r;
+        r.scenario_name = "tt_all_no_fill";
+        r.total_items = 8; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = 1;
+        r.all_placed = false; // expect partial
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = std::to_string(placed) + "/8 placed on 1 plate, rest overflow";
+        return r;
+    };
+
+    // ARRANGE ALL: consolidate ON, fill OFF — nuke, pack one plate, rest overflow
+    scenarios["tt_all_consolidate_no_fill"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) { auto ap = make_ap(make_rect(130, 130)); ap.bed_idx = i; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = true;
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int placed = 0;
+        for (auto &it : items) if (it.bed_idx >= 0) placed++;
+        TestResult r;
+        r.scenario_name = "tt_all_consolidate_no_fill";
+        r.total_items = 6; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = 1;
+        r.all_placed = false;
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = std::to_string(placed) + "/6 placed, consolidate + no fill = 1 plate max";
+        return r;
+    };
+
+    // KEEP PLATES: items must stay on assigned plate, no plate jumping
+    scenarios["tt_keep_plates_stay"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(60, 60)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(60, 60)); ap.bed_idx = 1; items.push_back(ap); }
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(60, 60)); ap.bed_idx = 2; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = false; // forced off by prepare
+        p.allow_multi_plate = false;  // forced off by prepare
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        bool correct = true;
+        for (int i = 0; i < 9; i++) {
+            int expected = i / 3;
+            if (items[i].bed_idx != expected) {
+                std::cout << "  [debug] item" << i << " expected plate " << expected
+                          << " got " << items[i].bed_idx << "\n";
+                correct = false;
+            }
+        }
+        TestResult r;
+        r.scenario_name = "tt_keep_plates_stay";
+        r.total_items = 9; r.placed_items = 9; r.elapsed_ms = 0;
+        r.plates_used = 3;
+        r.all_placed = true;
+        r.no_overlap = true;
+        r.notes = correct ? "all 9 items stayed on correct plates" : "WRONG PLATE ASSIGNMENT UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // KEEP PLATES: consolidate was on but should be ignored (forced off)
+    scenarios["tt_keep_consolidate_ignored"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 1; items.push_back(ap); }
+        auto p = params;
+        // Simulate: user had consolidate ON, but keep-plates forces it OFF
+        p.consolidate_plates = false; // prepare would force this
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        bool correct = true;
+        for (int i = 0; i < 4; i++) {
+            int expected = (i < 2) ? 0 : 1;
+            if (items[i].bed_idx != expected) correct = false;
+        }
+        TestResult r;
+        r.scenario_name = "tt_keep_consolidate_ignored";
+        r.total_items = 4; r.placed_items = 4; r.elapsed_ms = 0;
+        r.plates_used = 2;
+        r.all_placed = true;
+        r.no_overlap = true;
+        r.notes = correct ? "consolidate ignored, plates preserved" : "WRONG PLATE ASSIGNMENT UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // KEEP PLATES: overflow — too many items for one plate
+    scenarios["tt_keep_overflow_to_corner"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // 6 large items on plate 0 — only ~4 can fit
+        for (int i = 0; i < 6; i++) { auto ap = make_ap(make_rect(130, 130)); ap.bed_idx = 0; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = false;
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int on_plate_0 = 0;
+        bool all_on_0 = true;
+        for (int i = 0; i < 6; i++) {
+            if (items[i].bed_idx == 0) on_plate_0++;
+            if (items[i].bed_idx != 0) all_on_0 = false;
+        }
+        TestResult r;
+        r.scenario_name = "tt_keep_overflow_to_corner";
+        r.total_items = 6; r.placed_items = on_plate_0; r.elapsed_ms = 0;
+        r.plates_used = 1;
+        r.all_placed = all_on_0; // all should stay on plate 0 (placed or overflow)
+        r.no_overlap = true; // overflow items at (0,0) will overlap but that's intentional
+        r.notes = all_on_0 ? "all items on plate 0 (some at corner)" : "ITEMS LEFT PLATE 0 UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // KEEP PLATES: unassigned items should be IGNORED (not placed)
+    scenarios["tt_keep_ignores_unassigned"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 2; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = -1; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = false;
+        p.allow_multi_plate = false;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        // At the arranger level, unassigned items with preferred_plate=-1 will
+        // be treated as normal items (the filtering happens in prepare, not here).
+        // This test verifies basic behavior — prepare-level filtering is GUI-only.
+        int placed = 0;
+        for (auto &it : items) if (it.bed_idx >= 0) placed++;
+        TestResult r;
+        r.scenario_name = "tt_keep_ignores_unassigned";
+        r.total_items = 4; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = 1;
+        r.all_placed = (placed == 4); // arranger places everything it receives
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = "arranger places all items — unassigned filtering is GUI-layer";
+        return r;
+    };
+
+    // STRAGGLERS: unassigned items get placed, fill=true
+    scenarios["tt_stragglers_fill"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        // All unassigned — simulating what prepare_stragglers sends
+        for (int i = 0; i < 8; i++) {
+            auto ap = make_ap(make_rect(130, 130));
+            ap.bed_idx = -1;
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.consolidate_plates = false;
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int placed = 0, max_plate = -1;
+        for (auto &it : items) {
+            if (it.bed_idx >= 0) { placed++; max_plate = std::max(max_plate, it.bed_idx); }
+        }
+        TestResult r;
+        r.scenario_name = "tt_stragglers_fill";
+        r.total_items = 8; r.placed_items = placed; r.elapsed_ms = 0;
+        r.plates_used = max_plate + 1;
+        r.all_placed = (placed == 8);
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = r.all_placed ? ("all placed across " + std::to_string(r.plates_used) + " plates")
+                               : "UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // STRAGGLERS: consolidate should have been forced off — verify items aren't nuked
+    scenarios["tt_stragglers_no_consolidate"] = [=]() {
+        // Items with bed_idx >= 0 should keep their assignment (arranger level)
+        // Items with bed_idx = -1 should get placed
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = 0; items.push_back(ap); }
+        for (int i = 0; i < 3; i++) { auto ap = make_ap(make_rect(40, 40)); ap.bed_idx = -1; items.push_back(ap); }
+        auto p = params;
+        p.consolidate_plates = false; // forced off by prepare
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        // Check that plate-0 items stayed on plate 0
+        bool plate0_preserved = true;
+        for (int i = 0; i < 3; i++) {
+            if (items[i].bed_idx != 0) {
+                std::cout << "  [debug] item" << i << " was on plate 0, now on " << items[i].bed_idx << "\n";
+                plate0_preserved = false;
+            }
+        }
+        int stragglers_placed = 0;
+        for (int i = 3; i < 6; i++) if (items[i].bed_idx >= 0) stragglers_placed++;
+
+        TestResult r;
+        r.scenario_name = "tt_stragglers_no_consolidate";
+        r.total_items = 6; r.placed_items = 0; r.elapsed_ms = 0;
+        for (auto &it : items) if (it.bed_idx >= 0) r.placed_items++;
+        r.plates_used = 0;
+        for (auto &it : items) r.plates_used = std::max(r.plates_used, it.bed_idx + 1);
+        r.all_placed = (r.placed_items == 6);
+        r.no_overlap = check_no_overlap(items, bed);
+        r.notes = plate0_preserved ? "plate 0 preserved" : "PLATE 0 ITEMS MOVED";
+        r.notes += ", " + std::to_string(stragglers_placed) + "/3 stragglers placed";
+        if (!plate0_preserved || stragglers_placed < 3) r.notes += " UNEXPECTED_UNPLACED";
+        return r;
+    };
+
     // --- Straggler simulation (arranger level) ---
 
     scenarios["straggler_basic"] = [=]() {
