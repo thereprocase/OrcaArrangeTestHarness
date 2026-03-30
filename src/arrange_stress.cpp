@@ -328,7 +328,7 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         // ExPolygon path can't interlock — only concave_triangles path can.
         // Expect partial placement; this tests that it doesn't crash.
         return run_scenario("L_shapes_interlock", items, make_bed(130, 130), p, false,
-            "ExPolygon path — partial OK, concave_triangles needed for full interlock", true);
+            "tight bed — heuristic may not find optimal interlocking rotation", true);
     };
 
     scenarios["crescents_nest"] = [=]() {
@@ -587,23 +587,59 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
 
 // --- Main ---
 
+// Check if a build is currently running (ninja or cl.exe processes)
+static bool is_build_running() {
+#ifdef _WIN32
+    // Check for ninja.exe or cl.exe processes via tasklist
+    FILE* pipe = _popen("tasklist /FI \"IMAGENAME eq ninja.exe\" /NH 2>NUL", "r");
+    if (pipe) {
+        char buf[256];
+        std::string output;
+        while (fgets(buf, sizeof(buf), pipe)) output += buf;
+        _pclose(pipe);
+        if (output.find("ninja.exe") != std::string::npos)
+            return true;
+    }
+    pipe = _popen("tasklist /FI \"IMAGENAME eq cl.exe\" /NH 2>NUL", "r");
+    if (pipe) {
+        char buf[256];
+        std::string output;
+        while (fgets(buf, sizeof(buf), pipe)) output += buf;
+        _pclose(pipe);
+        if (output.find("cl.exe") != std::string::npos)
+            return true;
+    }
+#endif
+    return false;
+}
+
 int main(int argc, char **argv) {
     std::string run_scenario_name;
     bool run_all = false;
     bool verbose = false;
+    bool bench = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg(argv[i]);
         if (arg == "--all") run_all = true;
         else if (arg == "--verbose") verbose = true;
+        else if (arg == "--bench") bench = true;
         else if (arg == "--scenario" && i + 1 < argc) run_scenario_name = argv[++i];
         else {
-            std::cerr << "Usage: arrange_stress [--scenario NAME] [--all] [--verbose]\n";
+            std::cerr << "Usage: arrange_stress [--scenario NAME] [--all] [--bench] [--verbose]\n";
+            std::cerr << "  --bench: run timing-sensitive scenarios sequentially with build guard\n";
             return 1;
         }
     }
 
-    if (!run_all && run_scenario_name.empty()) run_all = true;
+    if (!run_all && !bench && run_scenario_name.empty()) run_all = true;
+
+    if (bench && is_build_running()) {
+        std::cerr << "ERROR: build in progress (ninja/cl.exe detected). "
+                  << "Timing results would be unreliable.\n"
+                  << "Wait for the build to finish, then run --bench again.\n";
+        return 1;
+    }
 
     // Open log file
     auto now = std::chrono::system_clock::now();
