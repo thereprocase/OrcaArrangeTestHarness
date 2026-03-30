@@ -1065,6 +1065,7 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         int on_plate_0 = 0;
         bool all_on_0 = true;
         for (int i = 0; i < 6; i++) {
+            std::cout << "  [debug] item" << i << "=plate" << items[i].bed_idx << "\n";
             if (items[i].bed_idx == 0) on_plate_0++;
             if (items[i].bed_idx != 0) all_on_0 = false;
         }
