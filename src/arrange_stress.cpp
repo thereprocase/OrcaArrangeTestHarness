@@ -29,6 +29,7 @@
 #include <cassert>
 #include "anti_gravity.hpp"
 #include "gravity.hpp"
+#include "gravity_v2.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::arrangement;
@@ -1832,6 +1833,179 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
                 + " rot:" + std::to_string((int)gr_rot.cluster_area_after)
                 + "mm2(" + std::to_string((int)gr_rot.elapsed_ms) + "ms)"
                 + " improvement:" + std::to_string((int)improvement) + "%";
+        return r;
+    };
+
+    // =====================================================================
+    // GRAVITY V2 — STOCHASTIC OPTIMIZATION BENCHMARKS
+    // =====================================================================
+
+    // --- V1 vs V2 head-to-head: rectangles ---
+    scenarios["v2_vs_v1_rects"] = [=]() {
+        auto make_items = [&]() {
+            std::vector<ArrangePolygon> items;
+            for (int i = 0; i < 10; i++) items.push_back(make_ap(make_rect(40, 40)));
+            BitmapArranger::arrange(items, {}, bed, params);
+            return items;
+        };
+
+        // V1
+        auto items_v1 = make_items();
+        GravityParams gp1;
+        gp1.padding_mm = unscaled(params.min_obj_distance);
+        gp1.target = GravityTarget::CENTER;
+        auto r1 = gravity_settle(items_v1, bed, gp1);
+
+        // V2
+        auto items_v2 = make_items();
+        GravityV2Params gp2;
+        gp2.padding_mm = unscaled(params.min_obj_distance);
+        gp2.target = GravityTarget::CENTER;
+        gp2.random_restarts = 5;
+        gp2.jiggle_rounds = 2;
+        gp2.swap_attempts = 20;
+        auto r2 = gravity_settle_v2(items_v2, bed, gp2);
+
+        TestResult r;
+        r.scenario_name = "v2_vs_v1_rects";
+        r.total_items = 10; r.placed_items = 10;
+        r.elapsed_ms = r1.elapsed_ms + r2.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = validate_arrangement(items_v2, bed, gp2.padding_mm).valid;
+        r.notes = "v1:" + std::to_string((int)r1.cluster_area_after)
+                + "mm2/" + std::to_string((int)r1.elapsed_ms) + "ms"
+                + " v2:" + std::to_string((int)r2.area_after_v2)
+                + "mm2/" + std::to_string((int)r2.elapsed_ms) + "ms"
+                + " basic:" + std::to_string((int)r2.area_after_basic) + "mm2"
+                + " best@r" + std::to_string(r2.best_restart)
+                + " swaps:" + std::to_string(r2.swaps_accepted);
+        if (!validate_arrangement(items_v2, bed, gp2.padding_mm).valid)
+            r.notes += " V2_OVERLAP";
+        return r;
+    };
+
+    // --- V2 with mixed concave shapes ---
+    scenarios["v2_mixed_shapes"] = [=]() {
+        auto make_items = [&]() {
+            std::vector<ArrangePolygon> items;
+            for (int i = 0; i < 3; i++) items.push_back(make_ap(make_L(45)));
+            for (int i = 0; i < 3; i++) items.push_back(make_ap(make_T(35)));
+            for (int i = 0; i < 2; i++) items.push_back(make_ap(make_rect(30, 60)));
+            for (int i = 0; i < 2; i++) items.push_back(make_ap(make_circle(20)));
+            auto p = params;
+            p.allow_rotations = true;
+            p.rotation_step_rad = M_PI / 2.0;
+            BitmapArranger::arrange(items, {}, bed, p);
+            return items;
+        };
+
+        auto items_v2 = make_items();
+        GravityV2Params gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CENTER;
+        gp.random_restarts = 8;
+        gp.jiggle_rounds = 3;
+        gp.jiggle_mm = 5.0;
+        gp.swap_attempts = 40;
+        auto r2 = gravity_settle_v2(items_v2, bed, gp);
+
+        TestResult r;
+        r.scenario_name = "v2_mixed_shapes";
+        r.total_items = 10; r.placed_items = 10;
+        r.elapsed_ms = r2.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = true; // skip concave overlap check
+        double improvement = (r2.cluster_area_before > 0) ?
+            100.0 * (1.0 - r2.area_after_v2 / r2.cluster_area_before) : 0;
+        r.notes = "before:" + std::to_string((int)r2.cluster_area_before)
+                + " basic:" + std::to_string((int)r2.area_after_basic)
+                + " v2:" + std::to_string((int)r2.area_after_v2)
+                + "mm2 (" + std::to_string((int)improvement) + "% tighter)"
+                + " " + std::to_string((int)r2.elapsed_ms) + "ms"
+                + " best@r" + std::to_string(r2.best_restart);
+        return r;
+    };
+
+    // --- V2 stress: many small items ---
+    scenarios["v2_stress_50"] = [=]() {
+        auto make_items = [&]() {
+            std::vector<ArrangePolygon> items;
+            for (int i = 0; i < 50; i++) items.push_back(make_ap(make_rect(20, 20)));
+            BitmapArranger::arrange(items, {}, bed, params);
+            return items;
+        };
+
+        auto items = make_items();
+        GravityV2Params gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CENTER;
+        gp.random_restarts = 3;  // fewer restarts — 50 items is expensive
+        gp.jiggle_rounds = 2;
+        gp.swap_attempts = 50;
+        auto r2 = gravity_settle_v2(items, bed, gp);
+
+        TestResult r;
+        r.scenario_name = "v2_stress_50";
+        r.total_items = 50; r.placed_items = 50;
+        r.elapsed_ms = r2.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = validate_arrangement(items, bed, gp.padding_mm).valid;
+        r.notes = "50 items: " + std::to_string((int)r2.cluster_area_before)
+                + " -> " + std::to_string((int)r2.area_after_v2) + "mm2"
+                + " (" + std::to_string((int)r2.elapsed_ms) + "ms)"
+                + " restarts:" + std::to_string(r2.restarts_tried)
+                + " best@r" + std::to_string(r2.best_restart)
+                + " swaps:" + std::to_string(r2.swaps_accepted);
+        if (!validate_arrangement(items, bed, gp.padding_mm).valid)
+            r.notes += " V2_OVERLAP";
+        return r;
+    };
+
+    // --- V2 seed comparison: does randomness help? ---
+    scenarios["v2_seed_tournament"] = [=]() {
+        auto make_items = [&]() {
+            std::vector<ArrangePolygon> items;
+            for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(45, 45)));
+            for (int i = 0; i < 4; i++) items.push_back(make_ap(make_L(40)));
+            BitmapArranger::arrange(items, {}, bed, params);
+            return items;
+        };
+
+        double best_area = 1e9;
+        int best_seed = 0;
+        double worst_area = 0;
+        double total_time = 0;
+
+        for (unsigned seed = 1; seed <= 10; seed++) {
+            auto items = make_items();
+            GravityV2Params gp;
+            gp.padding_mm = unscaled(params.min_obj_distance);
+            gp.target = GravityTarget::CENTER;
+            gp.random_restarts = 3;
+            gp.jiggle_rounds = 2;
+            gp.swap_attempts = 20;
+            gp.seed = seed;
+            auto r2 = gravity_settle_v2(items, bed, gp);
+            total_time += r2.elapsed_ms;
+
+            if (r2.area_after_v2 < best_area) {
+                best_area = r2.area_after_v2;
+                best_seed = seed;
+            }
+            worst_area = std::max(worst_area, r2.area_after_v2);
+        }
+
+        TestResult r;
+        r.scenario_name = "v2_seed_tournament";
+        r.total_items = 12; r.placed_items = 12;
+        r.elapsed_ms = total_time;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        double spread = (worst_area > 0) ? 100.0 * (worst_area - best_area) / worst_area : 0;
+        r.notes = "10 seeds: best=" + std::to_string((int)best_area)
+                + " worst=" + std::to_string((int)worst_area)
+                + "mm2 (spread:" + std::to_string((int)spread) + "%)"
+                + " best_seed=" + std::to_string(best_seed)
+                + " total:" + std::to_string((int)total_time) + "ms";
         return r;
     };
 
