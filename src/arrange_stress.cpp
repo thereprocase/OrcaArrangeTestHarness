@@ -769,7 +769,6 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
     };
 
     scenarios["keep_plates_verify_assignment"] = [=]() {
-        // Verify items actually stay on their assigned plate
         std::vector<ArrangePolygon> items;
         for (int i = 0; i < 2; i++) {
             auto ap = make_ap(make_rect(60, 60));
@@ -784,24 +783,41 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         auto p = params;
         p.allow_multi_plate = false;
 
+        // Debug: print bed_idx before
+        std::cout << "  [debug] before: ";
+        for (size_t i = 0; i < items.size(); i++)
+            std::cout << "item" << i << "=plate" << items[i].bed_idx << " ";
+        std::cout << "\n";
+
+        auto start = std::chrono::high_resolution_clock::now();
         BitmapArranger::arrange(items, {}, bed, p);
+        auto end = std::chrono::high_resolution_clock::now();
+
+        // Debug: print bed_idx after
+        std::cout << "  [debug] after:  ";
+        for (size_t i = 0; i < items.size(); i++)
+            std::cout << "item" << i << "=plate" << items[i].bed_idx << " ";
+        std::cout << "\n";
 
         TestResult result;
         result.scenario_name = "keep_plates_verify_assignment";
         result.total_items = 4;
         result.placed_items = 0;
         result.plates_used = 0;
+        result.elapsed_ms = std::chrono::duration<double, std::milli>(end - start).count();
         result.no_overlap = true;
         bool correct_plates = true;
         for (int i = 0; i < 4; i++) {
             if (items[i].bed_idx >= 0) result.placed_items++;
             result.plates_used = std::max(result.plates_used, items[i].bed_idx + 1);
             int expected_plate = (i < 2) ? 0 : 1;
-            if (items[i].bed_idx != expected_plate)
+            if (items[i].bed_idx != expected_plate) {
+                std::cout << "  [debug] item" << i << " expected plate " << expected_plate
+                          << " got plate " << items[i].bed_idx << "\n";
                 correct_plates = false;
+            }
         }
         result.all_placed = (result.placed_items == result.total_items);
-        result.elapsed_ms = 0;
         result.notes = correct_plates ? "all items on correct plates" : "WRONG PLATE ASSIGNMENT";
         if (!correct_plates) result.notes += " UNEXPECTED_UNPLACED";
         return result;
