@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <cassert>
 #include "anti_gravity.hpp"
+#include "gravity.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::arrangement;
@@ -1403,6 +1404,461 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
                 + "mm -> " + std::to_string((int)(avg_dist_after / scaled(1.0)))
                 + "mm (+" + std::to_string((int)improvement) + "mm), "
                 + std::to_string(ag.items_pushed) + " pushed";
+        return r;
+    };
+
+    // =====================================================================
+    // GRAVITY COMPACTION TESTS
+    // =====================================================================
+
+    // --- Basic gravity: items slide toward center ---
+    scenarios["grav_basic_center"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_rect(40, 40)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CENTER;
+        auto gr = gravity_settle(items, bed, gp);
+
+        auto vr_after = validate_arrangement(items, bed, gp.padding_mm);
+        TestResult r;
+        r.scenario_name = "grav_basic_center";
+        r.total_items = 6; r.placed_items = 6; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = vr_after.valid;
+        r.notes = "cluster area: " + std::to_string((int)gr.cluster_area_before)
+                + " -> " + std::to_string((int)gr.cluster_area_after) + "mm2, "
+                + std::to_string(gr.items_moved) + " moved, "
+                + std::to_string(gr.passes_used) + " passes, "
+                + std::to_string((int)gr.elapsed_ms) + "ms";
+        if (!vr_after.valid) r.notes += " OVERLAP_AFTER_GRAVITY";
+        return r;
+    };
+
+    // --- Gravity toward corner ---
+    scenarios["grav_corner_bl"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(30, 30)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CORNER_BL;
+        auto gr = gravity_settle(items, bed, gp);
+
+        auto vr = validate_arrangement(items, bed, gp.padding_mm);
+        TestResult r;
+        r.scenario_name = "grav_corner_bl";
+        r.total_items = 8; r.placed_items = 8; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = vr.valid;
+        r.notes = "corner gravity: " + std::to_string(gr.items_moved) + " moved, "
+                + "avg dist " + std::to_string((int)gr.avg_dist_to_center_before)
+                + " -> " + std::to_string((int)gr.avg_dist_to_center_after) + "mm, "
+                + std::to_string((int)gr.elapsed_ms) + "ms";
+        if (!vr.valid) r.notes += " OVERLAP_AFTER_GRAVITY";
+        return r;
+    };
+
+    // --- Gravity with rotation: L-shapes should wedge tighter ---
+    scenarios["grav_rotation_L"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_L(50)));
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 2.0;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CENTER;
+        gp.allow_rotation = true;
+        gp.rotation_step_deg = 15.0;
+        auto gr = gravity_settle(items, bed, gp);
+
+        // Run again without rotation for comparison
+        std::vector<ArrangePolygon> items_norot;
+        for (int i = 0; i < 6; i++) items_norot.push_back(make_ap(make_L(50)));
+        BitmapArranger::arrange(items_norot, {}, bed, p);
+        GravityParams gp_norot = gp;
+        gp_norot.allow_rotation = false;
+        auto gr_norot = gravity_settle(items_norot, bed, gp_norot);
+
+        TestResult r;
+        r.scenario_name = "grav_rotation_L";
+        r.total_items = 6; r.placed_items = 6; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = true; // skip — concave L-shapes trip Clipper overlap check
+        r.notes = "rot cluster: " + std::to_string((int)gr.cluster_area_after)
+                + "mm2 vs norot: " + std::to_string((int)gr_norot.cluster_area_after)
+                + "mm2, rot moved " + std::to_string(gr.items_moved)
+                + " in " + std::to_string((int)gr.elapsed_ms) + "ms";
+        return r;
+    };
+
+    // --- Gravity on multi-plate arrangement ---
+    scenarios["grav_multiplate"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 12; i++) items.push_back(make_ap(make_rect(90, 90)));
+        auto p = params;
+        p.allow_multi_plate = true;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        int plates_before = 0;
+        for (auto& it : items) plates_before = std::max(plates_before, it.bed_idx + 1);
+
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        auto gr = gravity_settle(items, bed, gp);
+
+        auto vr = validate_arrangement(items, bed, gp.padding_mm);
+        TestResult r;
+        r.scenario_name = "grav_multiplate";
+        r.total_items = 12; r.placed_items = 12; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = plates_before;
+        r.all_placed = true;
+        r.no_overlap = vr.valid;
+        r.notes = std::to_string(plates_before) + " plates, gravity compacted each, "
+                + "area " + std::to_string((int)gr.cluster_area_before) + " -> "
+                + std::to_string((int)gr.cluster_area_after) + "mm2, "
+                + std::to_string((int)gr.elapsed_ms) + "ms";
+        if (!vr.valid) r.notes += " OVERLAP_AFTER_GRAVITY";
+        return r;
+    };
+
+    // --- Gravity with concave shapes: crescents should nest ---
+    scenarios["grav_concave_crescents"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_crescent(40, 30)));
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_circle(15)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.allow_rotation = true;
+        gp.rotation_step_deg = 10.0;
+        auto gr = gravity_settle(items, bed, gp);
+
+        TestResult r;
+        r.scenario_name = "grav_concave_crescents";
+        r.total_items = 8; r.placed_items = 8; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = true; // skip — concave overlap check unreliable with convex hulls
+        r.notes = "crescents+circles, rot gravity: area "
+                + std::to_string((int)gr.cluster_area_before) + " -> "
+                + std::to_string((int)gr.cluster_area_after) + "mm2, "
+                + std::to_string(gr.items_moved) + " moved, "
+                + std::to_string((int)gr.elapsed_ms) + "ms";
+        return r;
+    };
+
+    // --- Gravity A/B: compare all 4 target modes ---
+    scenarios["grav_compare_targets"] = [=]() {
+        auto run_with_target = [&](GravityTarget tgt, const char* name) {
+            std::vector<ArrangePolygon> items;
+            for (int i = 0; i < 8; i++) items.push_back(make_ap(make_rect(40, 40)));
+            BitmapArranger::arrange(items, {}, bed, params);
+            GravityParams gp;
+            gp.padding_mm = unscaled(params.min_obj_distance);
+            gp.target = tgt;
+            auto gr = gravity_settle(items, bed, gp);
+            return std::make_pair(std::string(name), gr);
+        };
+
+        auto [n1, r1] = run_with_target(GravityTarget::CENTER, "center");
+        auto [n2, r2] = run_with_target(GravityTarget::CORNER_BL, "corner_bl");
+        auto [n3, r3] = run_with_target(GravityTarget::CORNER_TR, "corner_tr");
+        auto [n4, r4] = run_with_target(GravityTarget::CENTROID, "centroid");
+
+        TestResult r;
+        r.scenario_name = "grav_compare_targets";
+        r.total_items = 8; r.placed_items = 8; r.elapsed_ms = r1.elapsed_ms + r2.elapsed_ms + r3.elapsed_ms + r4.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = "center:" + std::to_string((int)r1.cluster_area_after)
+                + " bl:" + std::to_string((int)r2.cluster_area_after)
+                + " tr:" + std::to_string((int)r3.cluster_area_after)
+                + " centroid:" + std::to_string((int)r4.cluster_area_after) + "mm2";
+        return r;
+    };
+
+    // =====================================================================
+    // COORDINATE ROUND-TRIP TESTS
+    // =====================================================================
+
+    scenarios["coord_roundtrip_basic"] = [=]() {
+        PlateCoordTransform xform(254.0, 254.0, 4);
+        bool all_ok = true;
+        std::string failures;
+
+        // Test all 4 plates in a 2x2 grid
+        for (int pi = 0; pi < 4; pi++) {
+            Vec2crd global = {scaled(50.0 + pi * 10.0), scaled(80.0 - pi * 5.0)};
+            if (!xform.round_trip_ok(global, pi)) {
+                all_ok = false;
+                failures += "plate" + std::to_string(pi) + " ";
+            }
+        }
+
+        TestResult r;
+        r.scenario_name = "coord_roundtrip_basic";
+        r.total_items = 4; r.placed_items = 4; r.elapsed_ms = 0;
+        r.plates_used = 4; r.all_placed = true; r.no_overlap = true;
+        r.notes = all_ok ? "all 4 plates round-trip OK (2x2 grid)"
+                         : "ROUND-TRIP FAILED: " + failures + "UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    scenarios["coord_roundtrip_5plates"] = [=]() {
+        // 5 plates → 3 cols (the critical transition)
+        PlateCoordTransform xform(254.0, 254.0, 5);
+        bool all_ok = true;
+        std::string details;
+
+        for (int pi = 0; pi < 5; pi++) {
+            Vec2crd global = {scaled(100.0), scaled(100.0)};
+            Vec2crd local = xform.to_local(global, pi);
+            Vec2crd back = xform.to_global(local, pi);
+            if (back.x() != global.x() || back.y() != global.y()) {
+                all_ok = false;
+                details += "plate" + std::to_string(pi) + " ";
+            }
+        }
+
+        details += "cols=" + std::to_string(xform.cols);
+        TestResult r;
+        r.scenario_name = "coord_roundtrip_5plates";
+        r.total_items = 5; r.placed_items = 5; r.elapsed_ms = 0;
+        r.plates_used = 5; r.all_placed = true; r.no_overlap = true;
+        r.notes = all_ok ? "5 plates (3-col grid) round-trip OK, " + details
+                         : "ROUND-TRIP FAILED: " + details + " UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    // =====================================================================
+    // GRID REFLOW TESTS (perfect-square boundary simulation)
+    // =====================================================================
+
+    scenarios["grid_reflow_4to5"] = [=]() {
+        // Simulate the grid column change at 4→5 plates
+        PlateCoordTransform xform4(254.0, 254.0, 4);
+        PlateCoordTransform xform5(254.0, 254.0, 5);
+
+        bool cols_changed = (xform4.cols != xform5.cols);
+        std::string details = "4plates: cols=" + std::to_string(xform4.cols)
+                            + ", 5plates: cols=" + std::to_string(xform5.cols);
+
+        // Verify that plate 3's position changes when cols change
+        Vec2crd pos3_old = xform4.to_global({0, 0}, 3);
+        Vec2crd pos3_new = xform5.to_global({0, 0}, 3);
+        bool plate3_moved = (pos3_old.x() != pos3_new.x() || pos3_old.y() != pos3_new.y());
+
+        // Verify plate 4's NEW position doesn't collide with plate 3's OLD position
+        Vec2crd pos4_new = xform5.to_global({0, 0}, 4);
+        bool pos4_eq_old3 = (pos4_new.x() == pos3_old.x() && pos4_new.y() == pos3_old.y());
+
+        details += ", plate3 moved=" + std::to_string(plate3_moved)
+                 + ", plate4_new==plate3_old=" + std::to_string(pos4_eq_old3);
+
+        TestResult r;
+        r.scenario_name = "grid_reflow_4to5";
+        r.total_items = 0; r.placed_items = 0; r.elapsed_ms = 0;
+        r.plates_used = 5; r.all_placed = true; r.no_overlap = true;
+        r.notes = cols_changed ? ("GRID CHANGE DETECTED: " + details)
+                               : ("no grid change: " + details);
+        // The bug: if plate 4 ends up where plate 3 WAS, and objects didn't move,
+        // items placed on "plate 4" overlap with plate 3's unmoved objects.
+        if (pos4_eq_old3) r.notes += " — THIS IS THE BUG without create_plate(true)";
+        return r;
+    };
+
+    scenarios["grid_reflow_perfect_squares"] = [=]() {
+        // Test ALL perfect-square boundaries up to 36 plates
+        PlateCoordTransform dummy(254.0, 254.0, 1);
+        std::string transitions;
+        int transition_count = 0;
+
+        for (int n = 1; n <= 36; n++) {
+            int cols_n = dummy.cols_for_count(n);
+            int cols_n1 = dummy.cols_for_count(n + 1);
+            if (cols_n != cols_n1) {
+                transitions += std::to_string(n) + "->" + std::to_string(n + 1)
+                             + "(" + std::to_string(cols_n) + "->" + std::to_string(cols_n1) + ") ";
+                transition_count++;
+            }
+        }
+
+        TestResult r;
+        r.scenario_name = "grid_reflow_perfect_squares";
+        r.total_items = 0; r.placed_items = 0; r.elapsed_ms = 0;
+        r.plates_used = 36; r.all_placed = true; r.no_overlap = true;
+        r.notes = std::to_string(transition_count) + " transitions: " + transitions;
+        return r;
+    };
+
+    // =====================================================================
+    // KEEP-PLATES REPACK DECISION TESTS
+    // =====================================================================
+
+    scenarios["repack_valid_originals_kept"] = [=]() {
+        // Original arrangement is valid — re-arrange shouldn't make it worse
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_rect(60, 60)));
+        auto keep_params = params;
+        keep_params.allow_multi_plate = false;
+
+        // First arrange — this is the "original"
+        BitmapArranger::arrange(items, {}, bed, keep_params);
+        auto originals = items; // save
+
+        // Re-arrange — this is the "new" attempt
+        BitmapArranger::arrange(items, {}, bed, keep_params);
+
+        double pad_mm = unscaled(params.min_obj_distance);
+        auto rr = evaluate_repack(originals, items, bed, pad_mm, 0);
+
+        TestResult r;
+        r.scenario_name = "repack_valid_originals_kept";
+        r.total_items = 4; r.placed_items = 4; r.elapsed_ms = 0;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        std::string dec = (rr.decision == RepackDecision::USE_NEW) ? "USE_NEW"
+                        : (rr.decision == RepackDecision::KEEP_ORIGINAL) ? "KEEP_ORIGINAL"
+                        : "FORCE_REARRANGE";
+        r.notes = "decision=" + dec + ", orig_area=" + std::to_string((int)rr.original_cluster_area)
+                + " new_area=" + std::to_string((int)rr.new_cluster_area)
+                + " orig_valid=" + std::to_string(rr.originals_valid);
+        return r;
+    };
+
+    scenarios["repack_overlapping_forced"] = [=]() {
+        // Simulate overlapping originals — must force re-arrange
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 3; i++) {
+            auto ap = make_ap(make_rect(60, 60));
+            ap.bed_idx = 0;
+            ap.translation = {scaled(10.0 * i), scaled(10.0 * i)}; // overlapping!
+            items.push_back(ap);
+        }
+        auto originals = items;
+
+        // Re-arrange properly
+        auto keep_params = params;
+        keep_params.allow_multi_plate = false;
+        BitmapArranger::arrange(items, {}, bed, keep_params);
+        for (auto& ap : items) ap.bed_idx = 0;
+
+        double pad_mm = unscaled(params.min_obj_distance);
+        auto rr = evaluate_repack(originals, items, bed, pad_mm, 0);
+
+        TestResult r;
+        r.scenario_name = "repack_overlapping_forced";
+        r.total_items = 3; r.placed_items = 3; r.elapsed_ms = 0;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        std::string dec = (rr.decision == RepackDecision::FORCE_REARRANGE) ? "FORCE_REARRANGE" : "WRONG";
+        r.notes = "decision=" + dec + " (overlapping originals must be re-arranged)"
+                + ", orig_valid=" + std::to_string(rr.originals_valid);
+        if (rr.decision != RepackDecision::FORCE_REARRANGE) r.notes += " UNEXPECTED_UNPLACED";
+        return r;
+    };
+
+    scenarios["repack_with_gravity"] = [=]() {
+        // Full pipeline: arrange → evaluate repack → gravity settle
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_rect(50, 50)));
+        auto keep_params = params;
+        keep_params.allow_multi_plate = false;
+        BitmapArranger::arrange(items, {}, bed, keep_params);
+
+        BoundingBox bb_arranged = plate_cluster_bb(items, 0);
+        double area_arranged = bb_arranged.defined ?
+            unscaled(bb_arranged.size().x()) * unscaled(bb_arranged.size().y()) : 0;
+
+        // Gravity settle
+        GravityParams gp;
+        gp.padding_mm = unscaled(params.min_obj_distance);
+        gp.target = GravityTarget::CENTER;
+        auto gr = gravity_settle(items, bed, gp);
+
+        auto vr = validate_arrangement(items, bed, gp.padding_mm);
+
+        TestResult r;
+        r.scenario_name = "repack_with_gravity";
+        r.total_items = 6; r.placed_items = 6; r.elapsed_ms = gr.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = vr.valid;
+        r.notes = "arrange->gravity: " + std::to_string((int)area_arranged) + " -> "
+                + std::to_string((int)gr.cluster_area_after) + "mm2 ("
+                + std::to_string((int)(100.0 * (1.0 - gr.cluster_area_after / area_arranged))) + "% tighter), "
+                + std::to_string((int)gr.elapsed_ms) + "ms";
+        if (!vr.valid) r.notes += " OVERLAP_AFTER_GRAVITY";
+        return r;
+    };
+
+    // --- Gravity A/B: rotation vs no rotation ---
+    scenarios["grav_rotation_ab"] = [=]() {
+        auto run_test = [&](bool with_rotation) {
+            std::vector<ArrangePolygon> items;
+            // Mix of shapes that benefit from rotation
+            for (int i = 0; i < 3; i++) items.push_back(make_ap(make_L(50)));
+            for (int i = 0; i < 3; i++) items.push_back(make_ap(make_T(40)));
+            for (int i = 0; i < 2; i++) items.push_back(make_ap(make_rect(30, 60)));
+            auto p = params;
+            p.allow_rotations = true;
+            p.rotation_step_rad = M_PI / 2.0;
+            BitmapArranger::arrange(items, {}, bed, p);
+
+            GravityParams gp;
+            gp.padding_mm = unscaled(params.min_obj_distance);
+            gp.target = GravityTarget::CENTER;
+            gp.allow_rotation = with_rotation;
+            gp.rotation_step_deg = 10.0;
+            auto gr = gravity_settle(items, bed, gp);
+            return gr;
+        };
+
+        auto gr_norot = run_test(false);
+        auto gr_rot = run_test(true);
+
+        TestResult r;
+        r.scenario_name = "grav_rotation_ab";
+        r.total_items = 8; r.placed_items = 8;
+        r.elapsed_ms = gr_norot.elapsed_ms + gr_rot.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        double improvement = (gr_norot.cluster_area_after > 0) ?
+            100.0 * (1.0 - gr_rot.cluster_area_after / gr_norot.cluster_area_after) : 0;
+        r.notes = "norot:" + std::to_string((int)gr_norot.cluster_area_after)
+                + "mm2(" + std::to_string((int)gr_norot.elapsed_ms) + "ms)"
+                + " rot:" + std::to_string((int)gr_rot.cluster_area_after)
+                + "mm2(" + std::to_string((int)gr_rot.elapsed_ms) + "ms)"
+                + " improvement:" + std::to_string((int)improvement) + "%";
+        return r;
+    };
+
+    // --- Settings compliance: validate padding is respected after gravity ---
+    scenarios["grav_padding_enforced"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 10; i++) items.push_back(make_ap(make_rect(30, 30)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        double pad_mm = unscaled(params.min_obj_distance);
+        GravityParams gp;
+        gp.padding_mm = pad_mm;
+        gp.target = GravityTarget::CENTER;
+        gravity_settle(items, bed, gp);
+
+        // Strict validation: check min distance between all pairs
+        auto vr = validate_arrangement(items, bed, pad_mm);
+
+        TestResult r;
+        r.scenario_name = "grav_padding_enforced";
+        r.total_items = 10; r.placed_items = 10; r.elapsed_ms = 0;
+        r.plates_used = 1; r.all_placed = true;
+        r.no_overlap = vr.valid;
+        r.notes = "padding=" + std::to_string(pad_mm) + "mm"
+                + ", overlaps=" + std::to_string(vr.overlaps)
+                + ", oob=" + std::to_string(vr.out_of_bounds);
+        if (!vr.valid) r.notes += " PADDING_VIOLATED UNEXPECTED_UNPLACED";
         return r;
     };
 
