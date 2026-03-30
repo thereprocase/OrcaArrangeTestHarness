@@ -1,0 +1,7 @@
+This test harness links against libslic3r from OrcaSlicer, which is
+licensed under the GNU Affero General Public License v3.0 (AGPLv3).
+
+For compatibility, all original code in this repository is also provided
+under AGPLv3. See: https://www.gnu.org/licenses/agpl-3.0.html
+
+No OrcaSlicer source code is included in or redistributed by this project.
