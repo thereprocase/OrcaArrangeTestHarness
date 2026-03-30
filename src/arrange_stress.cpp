@@ -30,6 +30,7 @@
 #include "anti_gravity.hpp"
 #include "gravity.hpp"
 #include "gravity_v2.hpp"
+#include "contestants.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::arrangement;
@@ -2006,6 +2007,107 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
                 + "mm2 (spread:" + std::to_string((int)spread) + "%)"
                 + " best_seed=" + std::to_string(best_seed)
                 + " total:" + std::to_string((int)total_time) + "ms";
+        return r;
+    };
+
+    // =====================================================================
+    // DESIGN CONTEST — 4 algorithms compete head-to-head
+    // =====================================================================
+
+    double pad_mm = unscaled(params.min_obj_distance);
+
+    // Round 1: Simple rectangles
+    scenarios["contest_rects"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 10; i++) items.push_back(make_ap(make_rect(40, 40)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        auto cr = run_contest("10_rects", items, bed, pad_mm);
+        TestResult r;
+        r.scenario_name = "contest_rects";
+        r.total_items = 10; r.placed_items = 10; r.elapsed_ms = 0;
+        for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = format_contest(cr);
+        return r;
+    };
+
+    // Round 2: Mixed sizes
+    scenarios["contest_mixed_sizes"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        items.push_back(make_ap(make_rect(100, 100)));
+        items.push_back(make_ap(make_rect(80, 40)));
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_rect(30, 30)));
+        for (int i = 0; i < 6; i++) items.push_back(make_ap(make_circle(12)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        auto cr = run_contest("mixed_sizes", items, bed, pad_mm);
+        TestResult r;
+        r.scenario_name = "contest_mixed_sizes";
+        r.total_items = 12; r.placed_items = 12; r.elapsed_ms = 0;
+        for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = format_contest(cr);
+        return r;
+    };
+
+    // Round 3: Concave shapes
+    scenarios["contest_concave"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_L(45)));
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_T(35)));
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 2.0;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        auto cr = run_contest("concave_LT", items, bed, pad_mm);
+        TestResult r;
+        r.scenario_name = "contest_concave";
+        r.total_items = 8; r.placed_items = 8; r.elapsed_ms = 0;
+        for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = format_contest(cr);
+        return r;
+    };
+
+    // Round 4: Tight pack stress
+    scenarios["contest_tight_20"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 20; i++) items.push_back(make_ap(make_rect(30, 30)));
+        BitmapArranger::arrange(items, {}, bed, params);
+
+        auto cr = run_contest("tight_20", items, bed, pad_mm);
+        TestResult r;
+        r.scenario_name = "contest_tight_20";
+        r.total_items = 20; r.placed_items = 20; r.elapsed_ms = 0;
+        for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = format_contest(cr);
+        return r;
+    };
+
+    // Round 5: The gauntlet — everything at once
+    scenarios["contest_gauntlet"] = [=]() {
+        std::vector<ArrangePolygon> items;
+        items.push_back(make_ap(make_rect(120, 60)));
+        for (int i = 0; i < 3; i++) items.push_back(make_ap(make_L(40)));
+        for (int i = 0; i < 3; i++) items.push_back(make_ap(make_circle(18)));
+        for (int i = 0; i < 4; i++) items.push_back(make_ap(make_rect(25, 50)));
+        items.push_back(make_ap(make_crescent(30, 22)));
+        items.push_back(make_ap(make_U(35)));
+        auto p = params;
+        p.allow_rotations = true;
+        p.rotation_step_rad = M_PI / 2.0;
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        auto cr = run_contest("gauntlet", items, bed, pad_mm);
+        TestResult r;
+        r.scenario_name = "contest_gauntlet";
+        r.total_items = 14; r.placed_items = 14; r.elapsed_ms = 0;
+        for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+        r.plates_used = 1; r.all_placed = true; r.no_overlap = true;
+        r.notes = format_contest(cr);
         return r;
     };
 
