@@ -13,6 +13,9 @@
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/libslic3r.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -241,6 +244,28 @@ static bool check_no_overlap(const ArrangePolygons &items, const BoundingBox &be
         }
     }
     return true;
+}
+
+// --- Lib hash verification ---
+// Prints the libslic3r.lib timestamp so we can verify we're testing the right build.
+static void verify_lib() {
+#ifdef _WIN32
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    if (GetFileAttributesExA("F:\\Claude\\OrcaSlicer\\build\\src\\libslic3r\\Release\\libslic3r.lib",
+                              GetFileExInfoStandard, &fad)) {
+        FILETIME ft = fad.ftLastWriteTime;
+        SYSTEMTIME st;
+        FileTimeToSystemTime(&ft, &st);
+        std::cout << "[lib] libslic3r.lib modified: "
+                  << st.wYear << "-" << std::setfill('0') << std::setw(2) << st.wMonth
+                  << "-" << std::setw(2) << st.wDay
+                  << " " << std::setw(2) << st.wHour
+                  << ":" << std::setw(2) << st.wMinute
+                  << ":" << std::setw(2) << st.wSecond << " UTC\n";
+    } else {
+        std::cout << "[lib] WARNING: could not read libslic3r.lib timestamp\n";
+    }
+#endif
 }
 
 // --- Logging ---
@@ -865,6 +890,99 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
             "mixed materials allowed — all should fit on 1 plate");
     };
 
+    // --- Straggler simulation (arranger level) ---
+
+    scenarios["straggler_basic"] = [=]() {
+        // Simulate stragglers: items with bed_idx = UNARRANGED should get placed
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 3; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.bed_idx = -1; // UNARRANGED — straggler
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_plate = true;
+        return run_scenario("straggler_basic", items, bed, p, true,
+            "3 unassigned items should get placed on plates");
+    };
+
+    scenarios["straggler_verify_placed"] = [=]() {
+        // Verify every straggler gets a valid bed_idx after arrange
+        std::vector<ArrangePolygon> items;
+        for (int i = 0; i < 5; i++) {
+            auto ap = make_ap(make_rect(50, 50));
+            ap.bed_idx = -1;
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        TestResult result;
+        result.scenario_name = "straggler_verify_placed";
+        result.total_items = 5;
+        result.placed_items = 0;
+        result.plates_used = 0;
+        result.elapsed_ms = 0;
+        result.no_overlap = true;
+        bool all_assigned = true;
+        for (int i = 0; i < 5; i++) {
+            if (items[i].bed_idx >= 0) {
+                result.placed_items++;
+                result.plates_used = std::max(result.plates_used, items[i].bed_idx + 1);
+            } else {
+                all_assigned = false;
+                std::cout << "  [debug] item" << i << " still UNARRANGED after arrange\n";
+            }
+        }
+        result.all_placed = (result.placed_items == result.total_items);
+        result.notes = all_assigned ? "all stragglers assigned to plates" : "SOME UNARRANGED";
+        if (!all_assigned) result.notes += " UNEXPECTED_UNPLACED";
+        return result;
+    };
+
+    scenarios["straggler_with_obstacles"] = [=]() {
+        // Mix of placed items (obstacles) and stragglers
+        std::vector<ArrangePolygon> items;
+        // 4 "already placed" items on plate 0 — these are obstacles
+        for (int i = 0; i < 4; i++) {
+            auto ap = make_ap(make_rect(60, 60));
+            ap.bed_idx = 0; // already on plate
+            items.push_back(ap);
+        }
+        // 3 stragglers
+        for (int i = 0; i < 3; i++) {
+            auto ap = make_ap(make_rect(40, 40));
+            ap.bed_idx = -1; // unassigned
+            items.push_back(ap);
+        }
+        auto p = params;
+        p.allow_multi_plate = true;
+
+        BitmapArranger::arrange(items, {}, bed, p);
+
+        TestResult result;
+        result.scenario_name = "straggler_with_obstacles";
+        result.total_items = 7;
+        result.placed_items = 0;
+        result.plates_used = 0;
+        result.elapsed_ms = 0;
+        result.no_overlap = true;
+        int stragglers_placed = 0;
+        for (int i = 0; i < 7; i++) {
+            if (items[i].bed_idx >= 0) {
+                result.placed_items++;
+                result.plates_used = std::max(result.plates_used, items[i].bed_idx + 1);
+            }
+            if (i >= 4 && items[i].bed_idx >= 0) stragglers_placed++;
+        }
+        result.all_placed = (result.placed_items == result.total_items);
+        result.notes = "obstacles + stragglers, " + std::to_string(stragglers_placed) + "/3 stragglers placed";
+        if (stragglers_placed < 3) result.notes += " UNEXPECTED_UNPLACED";
+        return result;
+    };
+
     return scenarios;
 }
 
@@ -933,6 +1051,7 @@ int main(int argc, char **argv) {
 
     auto scenarios = build_scenarios();
 
+    verify_lib();
     std::cout << "\n=== BitmapArranger Stress Tests ===\n\n";
     if (g_log_file.is_open())
         g_log_file << "=== BitmapArranger Stress Tests ===\n\n";
