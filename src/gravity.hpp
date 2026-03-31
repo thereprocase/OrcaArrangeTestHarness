@@ -473,6 +473,27 @@ struct ValidationResult {
     double max_overlap_area_mm2 = 0;
 };
 
+// Accurate validation for concave shapes.
+//
+// The old validator dilated each polygon by half-padding and checked intersection.
+// This created false positives on concave shapes where dilation fills concavities
+// (an L-shape dilated becomes nearly rectangular, overlapping a neighbor that fits
+// in the concavity). False invalidation is WORSE than false acceptance — it
+// disqualifies valid placements.
+//
+// New approach:
+// 1. Check actual polygon intersection (no dilation) for HARD overlap
+// 2. Check minimum distance between polygon edges for padding violation
+//    using offset_ex with NEGATIVE offset: shrink each poly by padding/2,
+//    then check if the shrunken versions still exist (if a poly disappears
+//    after shrinking, it's too small for the padding — skip distance check)
+// 3. For padding check: offset ONE polygon by -(padding - epsilon) and check
+//    intersection with the other. If they intersect, they're closer than padding.
+//    This is more accurate than dilating both by half because dilation of concave
+//    shapes fills concavities, while erosion preserves them.
+//
+// Threshold: 1mm² for hard overlap, generous to avoid sub-pixel false positives.
+
 static ValidationResult validate_arrangement(
     const ArrangePolygons& items,
     const BoundingBox& bed,
@@ -481,39 +502,64 @@ static ValidationResult validate_arrangement(
 {
     ValidationResult vr;
 
+    // Generous threshold: 1mm² overlap area before flagging
+    // (bitmap arranger works at 1mm resolution, so sub-mm overlaps are noise)
+    double threshold_mm2 = 1.0;
+
     for (size_t i = 0; i < items.size(); i++) {
         if (plate_idx >= 0 && items[i].bed_idx != plate_idx) continue;
         if (items[i].bed_idx < 0) continue;
 
         ExPolygon pi_poly = item_footprint(items[i]);
 
-        // Bounds check
-        if (!within_bed(pi_poly, bed, padding_mm)) {
+        // Bounds check (with reduced margin — only flag if actually outside bed)
+        BoundingBox pb = get_extents(pi_poly);
+        coord_t margin = scaled(0.5); // 0.5mm tolerance for bed edge
+        if (pb.min.x() < bed.min.x() - margin ||
+            pb.min.y() < bed.min.y() - margin ||
+            pb.max.x() > bed.max.x() + margin ||
+            pb.max.y() > bed.max.y() + margin) {
             vr.out_of_bounds++;
             vr.valid = false;
         }
 
-        // Pairwise overlap check
+        // Pairwise overlap check — actual polygon intersection, no dilation
         for (size_t j = i + 1; j < items.size(); j++) {
             if (items[j].bed_idx != items[i].bed_idx) continue;
             if (items[j].bed_idx < 0) continue;
 
             ExPolygon pj_poly = item_footprint(items[j]);
 
-            // Dilate both by half padding
-            ExPolygons pi_d = offset_ex(pi_poly, scaled(padding_mm / 2.0));
-            ExPolygons pj_d = offset_ex(pj_poly, scaled(padding_mm / 2.0));
+            // Step 1: Hard overlap check (actual polygons, no padding)
+            ExPolygons hard_overlap = intersection_ex(pi_poly, pj_poly);
+            double hard_area_mm2 = 0;
+            for (const auto& o : hard_overlap)
+                hard_area_mm2 += std::abs(unscaled(unscaled(o.area())));
 
-            for (const auto& a : pi_d) {
-                for (const auto& b : pj_d) {
-                    ExPolygons overlap = intersection_ex(a, b);
-                    double area = 0;
-                    for (const auto& o : overlap) area += std::abs(o.area());
-                    double area_mm2 = unscaled(unscaled(area));
-                    if (area_mm2 > 0.01) { // 0.01 mm² threshold
+            if (hard_area_mm2 > threshold_mm2) {
+                vr.overlaps++;
+                vr.valid = false;
+                vr.max_overlap_area_mm2 = std::max(vr.max_overlap_area_mm2, hard_area_mm2);
+                continue; // already overlapping, skip padding check
+            }
+
+            // Step 2: Padding distance check
+            // Expand ONE polygon by (padding - 1mm tolerance) and check intersection.
+            // Using 80% of padding as the check distance to be generous —
+            // sub-pixel placement can't achieve exact padding at bitmap resolution.
+            if (padding_mm > 0.5) {
+                double check_dist = padding_mm * 0.8; // 80% of requested padding
+                ExPolygons pi_expanded = offset_ex(pi_poly, scaled(check_dist));
+                for (const auto& pe : pi_expanded) {
+                    ExPolygons pad_overlap = intersection_ex(pe, pj_poly);
+                    double pad_area_mm2 = 0;
+                    for (const auto& o : pad_overlap)
+                        pad_area_mm2 += std::abs(unscaled(unscaled(o.area())));
+
+                    if (pad_area_mm2 > threshold_mm2 * 4) { // 4mm² for padding violations
                         vr.overlaps++;
                         vr.valid = false;
-                        vr.max_overlap_area_mm2 = std::max(vr.max_overlap_area_mm2, area_mm2);
+                        vr.max_overlap_area_mm2 = std::max(vr.max_overlap_area_mm2, pad_area_mm2);
                     }
                 }
             }

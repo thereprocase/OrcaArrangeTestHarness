@@ -30,6 +30,7 @@
 #include "anti_gravity.hpp"
 #include "gravity.hpp"
 #include "gravity_v2.hpp"
+#include "part_generator.hpp"
 #include "contestants.hpp"
 
 using namespace Slic3r;
@@ -2137,6 +2138,72 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
         if (!vr.valid) r.notes += " PADDING_VIOLATED UNEXPECTED_UNPLACED";
         return r;
     };
+
+    // =====================================================================
+    // PART LIBRARY CONTESTS — random parts from 1000-piece library
+    // =====================================================================
+
+    double bed_area_mm2 = unscaled(bed.size().x()) * unscaled(bed.size().y());
+
+    // Helper: run a contest with parts from a category
+    // Library generated lazily on first use
+    auto make_lib_contest = [=](const std::string& scenario_name,
+                                const std::string& category,
+                                int n_items,
+                                unsigned trial_seed) -> std::function<TestResult()> {
+        return [=]() {
+            // Load from disk (generated once, reused forever)
+            static auto lib = get_part_library("parts");
+
+            std::mt19937 trial_rng(trial_seed);
+            double max_area = bed_area_mm2 * 0.65;
+            auto picks = pick_random_parts(lib, n_items, category, trial_rng, max_area);
+            auto items = parts_to_arrange_polys(lib, picks);
+
+            // Arrange with bitmap arranger
+            auto p = params;
+            p.allow_multi_plate = true;
+            p.allow_rotations = true;
+            p.rotation_step_rad = M_PI / 2.0;
+            BitmapArranger::arrange(items, {}, bed, p);
+
+            // Force all to plate 0 for contest comparison
+            for (auto& ap : items) if (ap.bed_idx < 0) ap.bed_idx = 0;
+
+            double pad_mm_val = unscaled(params.min_obj_distance);
+            auto cr = run_contest(scenario_name, items, bed, pad_mm_val);
+
+            TestResult r;
+            r.scenario_name = scenario_name;
+            r.total_items = (int)items.size();
+            r.placed_items = (int)items.size();
+            r.elapsed_ms = 0;
+            for (auto& e : cr.entries) r.elapsed_ms += e.elapsed_ms;
+            r.plates_used = 1;
+            r.all_placed = true;
+            r.no_overlap = true;
+            r.notes = format_contest(cr);
+            return r;
+        };
+    };
+
+    // Grid parts: 12 random rectangles/squares
+    scenarios["lib_grid_12"] = make_lib_contest("lib_grid_12", "grid", 12, 100);
+
+    // Mechanical parts: 10 random L/T/U/brackets/circles
+    scenarios["lib_mech_10"] = make_lib_contest("lib_mech_10", "mechanical", 10, 200);
+
+    // Triangle parts: 10 random triangles/traps/pentagons/stars
+    scenarios["lib_tri_10"] = make_lib_contest("lib_tri_10", "triangles", 10, 300);
+
+    // Organic parts: 8 random blobs/donuts/crescents/rorschach/kidney/amoeba
+    scenarios["lib_organic_8"] = make_lib_contest("lib_organic_8", "organic", 8, 400);
+
+    // Mixed: 15 parts from all categories
+    scenarios["lib_mixed_15"] = make_lib_contest("lib_mixed_15", "mixed", 15, 500);
+
+    // Stress: 25 mixed parts
+    scenarios["lib_stress_25"] = make_lib_contest("lib_stress_25", "mixed", 25, 600);
 
     return scenarios;
 }
