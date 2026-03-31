@@ -494,17 +494,39 @@ struct ValidationResult {
 //
 // Threshold: 1mm² for hard overlap, generous to avoid sub-pixel false positives.
 
+// Resolution-aware validation.
+//
+// KEY PRINCIPLE: the validation must never reject a result that the placement
+// algorithm considers valid. The placement works at bitmap_resolution_mm (default
+// 1mm), so positions are quantized to a 1mm grid. Two items "2mm apart" at bitmap
+// level could be anywhere from (2mm - resolution) to (2mm + resolution) apart in
+// exact polygon geometry.
+//
+// Therefore:
+// - Hard overlap threshold: resolution² area (a 1x1mm pixel of overlap is noise)
+// - Padding check distance: padding - 2*resolution (full pixel of fuzz each side)
+// - Bed margin: resolution (items can be up to 1px outside bed and still "on" it)
+//
+// bitmap_resolution_mm defaults to 1.0 but should match ArrangeParams.bitmap_resolution_mm
+
 static ValidationResult validate_arrangement(
     const ArrangePolygons& items,
     const BoundingBox& bed,
     double padding_mm,
-    int plate_idx = -1) // -1 = all plates
+    int plate_idx = -1,
+    double bitmap_resolution_mm = 1.0)
 {
     ValidationResult vr;
 
-    // Generous threshold: 1mm² overlap area before flagging
-    // (bitmap arranger works at 1mm resolution, so sub-mm overlaps are noise)
-    double threshold_mm2 = 1.0;
+    // Fuzz budget: placement can be off by up to 1 pixel per axis
+    double fuzz = bitmap_resolution_mm;
+
+    // Hard overlap: two items sharing more than 1 pixel² of area is real overlap.
+    // Below that is quantization noise.
+    double hard_threshold_mm2 = fuzz * fuzz * 2.0; // 2 pixels² worth
+
+    // Bed margin: items can be up to 1 pixel outside bed bounds
+    coord_t bed_margin = scaled(fuzz);
 
     for (size_t i = 0; i < items.size(); i++) {
         if (plate_idx >= 0 && items[i].bed_idx != plate_idx) continue;
@@ -512,43 +534,42 @@ static ValidationResult validate_arrangement(
 
         ExPolygon pi_poly = item_footprint(items[i]);
 
-        // Bounds check (with reduced margin — only flag if actually outside bed)
+        // Bounds check
         BoundingBox pb = get_extents(pi_poly);
-        coord_t margin = scaled(0.5); // 0.5mm tolerance for bed edge
-        if (pb.min.x() < bed.min.x() - margin ||
-            pb.min.y() < bed.min.y() - margin ||
-            pb.max.x() > bed.max.x() + margin ||
-            pb.max.y() > bed.max.y() + margin) {
+        if (pb.min.x() < bed.min.x() - bed_margin ||
+            pb.min.y() < bed.min.y() - bed_margin ||
+            pb.max.x() > bed.max.x() + bed_margin ||
+            pb.max.y() > bed.max.y() + bed_margin) {
             vr.out_of_bounds++;
             vr.valid = false;
         }
 
-        // Pairwise overlap check — actual polygon intersection, no dilation
+        // Pairwise checks
         for (size_t j = i + 1; j < items.size(); j++) {
             if (items[j].bed_idx != items[i].bed_idx) continue;
             if (items[j].bed_idx < 0) continue;
 
             ExPolygon pj_poly = item_footprint(items[j]);
 
-            // Step 1: Hard overlap check (actual polygons, no padding)
+            // Step 1: Hard overlap (actual polygons, no padding)
             ExPolygons hard_overlap = intersection_ex(pi_poly, pj_poly);
             double hard_area_mm2 = 0;
             for (const auto& o : hard_overlap)
                 hard_area_mm2 += std::abs(unscaled(unscaled(o.area())));
 
-            if (hard_area_mm2 > threshold_mm2) {
+            if (hard_area_mm2 > hard_threshold_mm2) {
                 vr.overlaps++;
                 vr.valid = false;
                 vr.max_overlap_area_mm2 = std::max(vr.max_overlap_area_mm2, hard_area_mm2);
-                continue; // already overlapping, skip padding check
+                continue;
             }
 
             // Step 2: Padding distance check
-            // Expand ONE polygon by (padding - 1mm tolerance) and check intersection.
-            // Using 80% of padding as the check distance to be generous —
-            // sub-pixel placement can't achieve exact padding at bitmap resolution.
-            if (padding_mm > 0.5) {
-                double check_dist = padding_mm * 0.8; // 80% of requested padding
+            // Expand one polygon by (padding - 2*fuzz) and check intersection.
+            // The 2*fuzz accounts for quantization error on BOTH items.
+            // If padding <= 2*fuzz, skip — can't meaningfully check at this resolution.
+            double check_dist = padding_mm - 2.0 * fuzz;
+            if (check_dist > 0) {
                 ExPolygons pi_expanded = offset_ex(pi_poly, scaled(check_dist));
                 for (const auto& pe : pi_expanded) {
                     ExPolygons pad_overlap = intersection_ex(pe, pj_poly);
@@ -556,7 +577,8 @@ static ValidationResult validate_arrangement(
                     for (const auto& o : pad_overlap)
                         pad_area_mm2 += std::abs(unscaled(unscaled(o.area())));
 
-                    if (pad_area_mm2 > threshold_mm2 * 4) { // 4mm² for padding violations
+                    // Only flag if the overlap is substantial — more than a few pixels
+                    if (pad_area_mm2 > hard_threshold_mm2 * 4) {
                         vr.overlaps++;
                         vr.valid = false;
                         vr.max_overlap_area_mm2 = std::max(vr.max_overlap_area_mm2, pad_area_mm2);

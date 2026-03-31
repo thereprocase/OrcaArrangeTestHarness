@@ -1375,6 +1375,16 @@ static ContestResult run_contest(
     cr.test_name = name;
     cr.starting_area = cluster_area_mm2(items, plate_idx);
 
+    // Validate starting arrangement — skip contest if input is broken
+    auto start_vr = validate_arrangement(items, bed, padding_mm, plate_idx);
+    if (!start_vr.valid) {
+        std::cout << "  SKIP: starting arrangement invalid (overlaps="
+                  << start_vr.overlaps << " oob=" << start_vr.out_of_bounds
+                  << " max=" << (int)start_vr.max_overlap_area_mm2 << "mm2)\n";
+        cr.winner = "SKIP:BAD_INPUT";
+        return cr;
+    }
+
     // Register all contestants
     struct Contestant {
         std::string label;

@@ -525,6 +525,15 @@ static ArrangePolygons parts_to_arrange_polys(
         // Ensure correct orientation (CCW contour, CW holes)
         ap.poly.contour.make_counter_clockwise();
         for (auto& h : ap.poly.holes) h.make_clockwise();
+        // Normalize: shift so bounding box starts at (0,0)
+        // Many generated shapes (circles, blobs) are centered at origin with
+        // negative coordinates. The arranger expects all-positive contours.
+        BoundingBox bb = get_extents(ap.poly);
+        if (bb.min.x() < 0 || bb.min.y() < 0) {
+            coord_t dx = -bb.min.x();
+            coord_t dy = -bb.min.y();
+            ap.poly.translate(dx, dy);
+        }
         ap.translation = {0, 0};
         ap.rotation = 0;
         ap.bed_idx = -1;

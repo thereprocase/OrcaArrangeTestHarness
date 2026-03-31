@@ -2167,8 +2167,10 @@ static std::map<std::string, ScenarioFn> build_scenarios() {
             p.rotation_step_rad = M_PI / 2.0;
             BitmapArranger::arrange(items, {}, bed, p);
 
-            // Force all to plate 0 for contest comparison
-            for (auto& ap : items) if (ap.bed_idx < 0) ap.bed_idx = 0;
+            // Keep only plate 0 items — remove unarranged AND multi-plate overflow.
+            // Contest compares compaction on a single plate.
+            items.erase(std::remove_if(items.begin(), items.end(),
+                [](const ArrangePolygon& ap) { return ap.bed_idx != 0; }), items.end());
 
             double pad_mm_val = unscaled(params.min_obj_distance);
             auto cr = run_contest(scenario_name, items, bed, pad_mm_val);
